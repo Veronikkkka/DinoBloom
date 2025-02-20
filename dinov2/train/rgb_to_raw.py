@@ -10,9 +10,12 @@ def rgb_to_raw(image_path="", img=None):
         img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     else:
         img = np.array(img)
+    
     if img is None:
         raise ValueError("Error loading image. Please check the path.")
    
+    print(img.shape, img.dtype)
+    cv2.imwrite("new.jpg", img)
     if len(img.shape) == 3:
         img_raw = img[:, :, 1]  # Extract green channel as a naive RAW simulation
     else:
@@ -22,6 +25,7 @@ def rgb_to_raw(image_path="", img=None):
     if img_raw.dtype != np.uint16:
         img_raw = (img_raw.astype(np.float32) / 255.0 * 65535).astype(np.uint16)
     
+    cv2.imwrite("new2.jpg", img)
     return img_raw
 
 # def rgb_to_raw(image_path, local_crops_number=6):
@@ -64,26 +68,57 @@ def rgb_to_raw(image_path="", img=None):
 #     return output
 
 
-from PIL import Image
 
-def raw_to_rgb(raw_input, normalize: bool = True) -> Image.Image:
+import numpy as np
+import cv2
 
-    if isinstance(raw_input, torch.Tensor):
-        raw_np = raw_input.detach().cpu().numpy()
-    else:
-        raw_np = raw_input
-
-    if raw_np.ndim == 3 and raw_np.shape[0] == 1:
-        raw_np = raw_np[0]
-
-    if normalize:
-        raw_np = (raw_np - raw_np.min()) / (raw_np.max() - raw_np.min() + 1e-8) * 255.0
-        raw_np = raw_np.astype(np.uint8)
-
-    rgb_image = cv2.cvtColor(raw_np, cv2.COLOR_GRAY2RGB)
-
-    return Image.fromarray(rgb_image)
-
+def raw_to_rgb(raw_array, pattern='RGGB', image_size=(256, 256), bits=16):
+    """
+    Convert RAW sensor data to RGB image with improved handling of various bit depths
+    and white balance correction.
+    
+    Args:
+        raw_array: NumPy array containing RAW sensor data
+        pattern: Bayer pattern ('RGGB', 'BGGR', 'GRBG', 'GBRG')
+        image_size: Tuple of (height, width)
+        bits: Bit depth of the RAW data (typically 12, 14, or 16)
+    
+    Returns:
+        RGB image as numpy array
+    """
+    if not isinstance(raw_array, np.ndarray):
+        raise TypeError("Input must be a NumPy array.")
+    
+    total_pixels = np.prod(image_size)
+    if raw_array.size != total_pixels:
+        raise ValueError(f"Expected raw array size {total_pixels}, but got {raw_array.size}")
+    
+    raw_image = raw_array.reshape(image_size)
+    max_value = 2**bits - 1
+    
+    if raw_image.dtype != np.uint8:
+        raw_image = (raw_image / max_value * 255).astype(np.uint8)
+    
+    bayer_patterns = {
+        'RGGB': cv2.COLOR_BayerBG2BGR,
+        'BGGR': cv2.COLOR_BayerGB2BGR,
+        'GRBG': cv2.COLOR_BayerGR2BGR,
+        'GBRG': cv2.COLOR_BayerRG2BGR
+    }
+   
+    rgb_image = cv2.demosaicing(raw_image, bayer_patterns[pattern])
+    
+    rgb_image_float = rgb_image.astype(float)
+    for i in range(3):
+        channel = rgb_image_float[:,:,i]
+        mean_val = np.mean(channel)
+        if mean_val > 0:
+            channel *= 128 / mean_val
+            rgb_image_float[:,:,i] = channel
+    
+    rgb_image = np.clip(rgb_image_float, 0, 255)
+    
+    return rgb_image
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert RGB image to RAW format.")
@@ -93,5 +128,7 @@ if __name__ == "__main__":
     
     raw = rgb_to_raw(args.image_path)
     print(raw, type(raw), raw.shape)
-    rgb = raw_to_rgb(raw)
-    print(rgb)
+    # rgb = raw_to_rgb(raw)
+    rgb = raw_to_rgb(raw, image_size=(512, 683))
+    cv2.imwrite('output.jpg', rgb)
+    print(rgb.shape)
