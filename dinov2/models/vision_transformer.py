@@ -19,6 +19,7 @@ from dinov2.layers import MemEffAttention, Mlp
 from dinov2.layers import NestedTensorBlock as Block
 from dinov2.layers import PatchEmbed, SwiGLUFFNFused
 from torch.nn.init import trunc_normal_
+from dinov2.models.help import Merge_block, Input_level_Adapeter, Model_level_Adapeter
 
 logger = logging.getLogger("dinov2")
 
@@ -65,36 +66,18 @@ class DinoVisionTransformer(nn.Module):
         num_register_tokens=0,
         interpolate_antialias=False,
         interpolate_offset=0.1,
+        # --- RAW adapter parameters ---
+        w_lut=True,
+        light_mode='normal',
+        lut_dim=32, 
+        k_size=3,
+        merge_ratio=1.0,
+        ada_dim=32,
     ):
-        """
-        Args:
-            img_size (int, tuple): input image size
-            patch_size (int, tuple): patch size
-            in_chans (int): number of input channels
-            embed_dim (int): embedding dimension
-            depth (int): depth of transformer
-            num_heads (int): number of attention heads
-            mlp_ratio (int): ratio of mlp hidden dim to embedding dim
-            qkv_bias (bool): enable bias for qkv if True
-            proj_bias (bool): enable bias for proj in attn if True
-            ffn_bias (bool): enable bias for ffn if True
-            drop_path_rate (float): stochastic depth rate
-            drop_path_uniform (bool): apply uniform drop rate across blocks
-            weight_init (str): weight init scheme
-            init_values (float): layer-scale init values
-            embed_layer (nn.Module): patch embedding layer
-            act_layer (nn.Module): MLP activation layer
-            block_fn (nn.Module): transformer block class
-            ffn_layer (str): "mlp", "swiglu", "swiglufused" or "identity"
-            block_chunks: (int) split block sequence into block_chunks units for FSDP wrap
-            num_register_tokens: (int) number of extra cls tokens (so-called "registers")
-            interpolate_antialias: (str) flag to apply anti-aliasing when interpolating positional embeddings
-            interpolate_offset: (float) work-around offset to apply when interpolating positional embeddings
-        """
         super().__init__()
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        self.num_features = self.embed_dim = embed_dim  # for consistency
         self.num_tokens = 1
         self.n_blocks = depth
         self.num_heads = num_heads
@@ -103,20 +86,28 @@ class DinoVisionTransformer(nn.Module):
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
 
+        # RAW adapter conf
+        self.w_lut = w_lut
+        self.light_mode = light_mode
+        self.lut_dim = lut_dim
+        self.k_size = k_size
+        self.merge_ratio = merge_ratio
+        self.ada_dim = ada_dim
+
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
-        assert num_register_tokens >= 0
-        self.register_tokens = (
-            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
-        )
+        if num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim))
+        else:
+            self.register_tokens = None
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
         else:
-            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
 
         if ffn_layer == "mlp":
             logger.info("using MLP layer as FFN")
@@ -126,11 +117,7 @@ class DinoVisionTransformer(nn.Module):
             ffn_layer = SwiGLUFFNFused
         elif ffn_layer == "identity":
             logger.info("using Identity layer as FFN")
-
-            def f(*args, **kwargs):
-                return nn.Identity()
-
-            ffn_layer = f
+            ffn_layer = lambda *args, **kwargs: nn.Identity()
         else:
             raise NotImplementedError
 
@@ -167,7 +154,15 @@ class DinoVisionTransformer(nn.Module):
 
         self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
 
+        # Initialize RAW adapter
+        if self.w_lut:
+            self.pre_encoder = Input_level_Adapeter(mode=light_mode, lut_dim=lut_dim, k_size=k_size, w_lut=w_lut)
+            self.model_adapter = Model_level_Adapeter(in_c=in_chans, in_dim=ada_dim, w_lut=w_lut)
+            # merge the patch embeddings (fea_c = embed_dim) with the adapter features
+            self.merge_block = Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=False)
+
         self.init_weights()
+        print("STARTED:")
 
     def init_weights(self):
         trunc_normal_(self.pos_embed, std=0.02)
@@ -190,7 +185,7 @@ class DinoVisionTransformer(nn.Module):
         h0 = h // self.patch_size
         # we add a small number to avoid floating point error in the interpolation
         # see discussion at https://github.com/facebookresearch/dino/issues/8
-        w0, h0 = w0 + self.interpolate_offset, h0 + self.interpolate_offset
+        w0, h0 = w0 + 0.1, h0 + 0.1
 
         sqrt_N = math.sqrt(N)
         sx, sy = float(w0) / sqrt_N, float(h0) / sqrt_N
@@ -200,7 +195,6 @@ class DinoVisionTransformer(nn.Module):
             mode="bicubic",
             antialias=self.interpolate_antialias,
         )
-
         assert int(w0) == patch_pos_embed.shape[-2]
         assert int(h0) == patch_pos_embed.shape[-1]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
@@ -208,23 +202,30 @@ class DinoVisionTransformer(nn.Module):
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
-        x = self.patch_embed(x)
+        # RAW adapter processing
+        if self.w_lut:
+            x_raw = self.pre_encoder(x)
+            if isinstance(x_raw, (list, tuple)):
+                x_raw_feature = x_raw[-1]
+            else:
+                x_raw_feature = x_raw
+            ada = self.model_adapter(x_raw_feature)
+        else:
+            ada = None
+
+        # Patch embedding
+        x = self.patch_embed(x)  # [B, num_patches, embed_dim]
+        # Merge the adapter features with the patch tokens
+        if self.w_lut and ada is not None:
+            x = self.merge_block(x, ada, ratio=self.merge_ratio)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
-
         if self.register_tokens is not None:
             x = torch.cat(
-                (
-                    x[:, :1],
-                    self.register_tokens.expand(x.shape[0], -1, -1),
-                    x[:, 1:],
-                ),
-                dim=1,
+                (x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1
             )
-
         return x
 
     def forward_features_list(self, x_list, masks_list):
@@ -257,6 +258,7 @@ class DinoVisionTransformer(nn.Module):
             x = blk(x)
 
         x_norm = self.norm(x)
+        print("INSIDE FORWARD")
         return {
             "x_norm_clstoken": x_norm[:, 0],
             "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
@@ -267,7 +269,6 @@ class DinoVisionTransformer(nn.Module):
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)
-        # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
         for i, blk in enumerate(self.blocks):
@@ -280,10 +281,9 @@ class DinoVisionTransformer(nn.Module):
     def _get_intermediate_layers_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)
         output, i, total_block_len = [], 0, len(self.blocks[-1])
-        # If n is an int, take the n last blocks. If it's a list, take them
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
         for block_chunk in self.blocks:
-            for blk in block_chunk[i:]:  # Passing the nn.Identity()
+            for blk in block_chunk[i:]:
                 x = blk(x)
                 if i in blocks_to_take:
                     output.append(x)
@@ -294,7 +294,7 @@ class DinoVisionTransformer(nn.Module):
     def get_intermediate_layers(
         self,
         x: torch.Tensor,
-        n: Union[int, Sequence] = 1,  # Layers or n last layers to take
+        n: Union[int, Sequence] = 1,
         reshape: bool = False,
         return_class_token: bool = False,
         norm=True,
@@ -326,7 +326,7 @@ class DinoVisionTransformer(nn.Module):
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ""):
-    """ViT weight initialization, original timm impl (for reproducibility)"""
+    """ViT weight initialization (as in timm) for reproducibility."""
     if isinstance(module, nn.Linear):
         trunc_normal_(module.weight, std=0.02)
         if module.bias is not None:
@@ -348,6 +348,7 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
 
 
 def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
+    print("HERE AM III")
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=768,
@@ -377,7 +378,7 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
 
 def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
     """
-    Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64
+    Close to ViT-giant, with embed-dim 1536 and 24 heads (embed-dim per head 64)
     """
     model = DinoVisionTransformer(
         patch_size=patch_size,
