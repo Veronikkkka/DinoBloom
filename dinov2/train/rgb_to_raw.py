@@ -3,6 +3,8 @@ import cv2
 import argparse
 from pathlib import Path
 import torch
+from PIL import Image
+import numpy as np
 
 
 def rgb_to_raw(image_path="", img=None):
@@ -14,8 +16,8 @@ def rgb_to_raw(image_path="", img=None):
     if img is None:
         raise ValueError("Error loading image. Please check the path.")
    
-    print(img.shape, img.dtype)
-    cv2.imwrite("new.jpg", img)
+    # print(img.shape, img.dtype)
+    # cv2.imwrite("new.jpg", img)
     if len(img.shape) == 3:
         img_raw = img[:, :, 1]  # Extract green channel as a naive RAW simulation
     else:
@@ -25,7 +27,7 @@ def rgb_to_raw(image_path="", img=None):
     if img_raw.dtype != np.uint16:
         img_raw = (img_raw.astype(np.float32) / 255.0 * 65535).astype(np.uint16)
     
-    cv2.imwrite("new2.jpg", img)
+    # cv2.imwrite("new2.jpg", img)
     return img_raw
 
 # def rgb_to_raw(image_path, local_crops_number=6):
@@ -89,13 +91,13 @@ def raw_to_rgb(raw_array, pattern='RGGB', image_size=(256, 256), bits=16):
     if not isinstance(raw_array, np.ndarray):
         raise TypeError("Input must be a NumPy array.")
     
-    total_pixels = np.prod(image_size)
-    if raw_array.size != total_pixels:
-        raise ValueError(f"Expected raw array size {total_pixels}, but got {raw_array.size}")
+    # total_pixels = np.prod(image_size)
+    # if raw_array.size != total_pixels:
+    #     raise ValueError(f"Expected raw array size {total_pixels}, but got {raw_array.size}")
     
-    raw_image = raw_array.reshape(image_size)
+    # raw_image = raw_array.reshape(image_size)
     max_value = 2**bits - 1
-    
+    raw_image = raw_array
     if raw_image.dtype != np.uint8:
         raw_image = (raw_image / max_value * 255).astype(np.uint8)
     
@@ -117,8 +119,11 @@ def raw_to_rgb(raw_array, pattern='RGGB', image_size=(256, 256), bits=16):
             rgb_image_float[:,:,i] = channel
     
     rgb_image = np.clip(rgb_image_float, 0, 255)
+    # cv2.imwrite('output.jpg', rgb_image)
+    pil_image = Image.fromarray(rgb_image.astype(np.uint8), mode='RGB')
+
     
-    return rgb_image
+    return pil_image
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert RGB image to RAW format.")
@@ -130,5 +135,5 @@ if __name__ == "__main__":
     print(raw, type(raw), raw.shape)
     # rgb = raw_to_rgb(raw)
     rgb = raw_to_rgb(raw, image_size=(512, 683))
-    cv2.imwrite('output.jpg', rgb)
-    print(rgb.shape)
+    
+    print(rgb)
