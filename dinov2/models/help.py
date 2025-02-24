@@ -44,7 +44,7 @@ class Merge_block(BaseModule):
                 (fea_out, None)
         """
         res = fea
-        # Concatenate along the channel dimension.
+
         fusion = torch.cat([fea, adapter], dim=1)
         fusion = self.conv_1(fusion)
         ada = self.conv_2(fusion)
@@ -67,14 +67,13 @@ class Model_level_Adapeter(nn.Module):
             w_lut (bool): Whether the adapter uses LUT-related processing (placeholder here).
         """
         super(Model_level_Adapeter, self).__init__()
-        # A simple three-layer convolutional block.
+
         self.conv1 = nn.Conv2d(in_c, in_dim, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(in_dim)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(in_dim, in_dim, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(in_dim)
-        
-        # You can add more layers or a LUT branch if needed.
+
         self.w_lut = w_lut
 
     def forward(self, x):
@@ -93,29 +92,6 @@ class Model_level_Adapeter(nn.Module):
         return out
 
 
-if __name__ == '__main__':
-    # Assume feature map from patch embed is of shape (B, embed_dim, H, W)
-    B, embed_dim, H, W = 2, 768, 14, 14
-    fea = torch.randn(B, embed_dim, H, W)
-    
-    # Assume adapter feature map from Model_level_Adapeter is of shape (B, ada_dim, H, W)
-    ada_dim = 32
-    adapter = torch.randn(B, ada_dim, H, W)
-    
-    # Create a merge block: merging fea (channels=embed_dim) with adapter (channels=ada_dim)
-    mid_c = embed_dim  # for example, you can set the intermediate channel to embed_dim
-    merge_block = Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=mid_c, return_ada=True)
-    
-    fea_out, new_adapter = merge_block(fea, adapter, ratio=1.0)
-    print("Output feature map shape:", fea_out.shape)
-    if new_adapter is not None:
-        print("New adapter shape:", new_adapter.shape)
-    
-    # Example Model_level_Adapeter usage:
-    model_adapter = Model_level_Adapeter(in_c=3, in_dim=ada_dim, w_lut=True)
-    raw_input = torch.randn(B, 3, H, W)
-    adapted_feat = model_adapter(raw_input)
-    print("Adapted feature shape:", adapted_feat.shape)
 
 
 import torch
