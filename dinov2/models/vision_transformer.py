@@ -213,22 +213,9 @@ class DinoVisionTransformer(nn.Module):
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
-        # RAW adapter processing
-        if self.w_lut:
-            x_raw = self.pre_encoder(x)
-            if isinstance(x_raw, (list, tuple)):
-                x_raw_feature = x_raw[-1]
-            else:
-                x_raw_feature = x_raw
-            ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
-        else:
-            ada = None
-
         # Patch embedding
         x = self.patch_embed(x)  # [B, num_patches, embed_dim]
-        # Merge the adapter features with the patch tokens
-        if self.w_lut and ada is not None:
-            x = self.merge_block(x, ada, ratio=self.merge_ratio)
+        
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
@@ -265,8 +252,21 @@ class DinoVisionTransformer(nn.Module):
 
         x = self.prepare_tokens_with_masks(x, masks)
 
+        if self.w_lut:
+            x_raw = self.pre_encoder(x)
+            if isinstance(x_raw, (list, tuple)):
+                x_raw_feature = x_raw[-1]
+            else:
+                x_raw_feature = x_raw
+            ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
+        else:
+            ada = None
+        ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
+
         for blk in self.blocks:
             x = blk(x)
+            if self.w_lut and ada is not None:
+                x = self.merge_block(x, ada, ratio=self.merge_ratio)
 
         x_norm = self.norm(x)
         print("INSIDE FORWARD")
