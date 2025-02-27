@@ -19,8 +19,8 @@ from dinov2.layers import MemEffAttention, Mlp
 from dinov2.layers import NestedTensorBlock as Block
 from dinov2.layers import PatchEmbed, SwiGLUFFNFused
 from torch.nn.init import trunc_normal_
-from dinov2.models.help import Merge_block, Input_level_Adapeter, Model_level_Adapeter
-
+from dinov2.models.help import Merge_block, Model_level_Adapeter
+from dinov2.models.help  import VitInputLevelAdapter as Input_level_Adapeter
 logger = logging.getLogger("dinov2")
 
 
@@ -73,6 +73,7 @@ class DinoVisionTransformer(nn.Module):
         k_size=3,
         merge_ratio=1.0,
         ada_dim=32,
+        model_adapter_path=None
     ):
         super().__init__()
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -157,7 +158,17 @@ class DinoVisionTransformer(nn.Module):
         # Initialize RAW adapter
         if self.w_lut:
             self.pre_encoder = Input_level_Adapeter(mode=light_mode, lut_dim=lut_dim, k_size=k_size, w_lut=w_lut)
-            self.model_adapter = Model_level_Adapeter(in_c=in_chans, in_dim=ada_dim, w_lut=w_lut)
+            self.model_adapter = Model_level_Adapeter(in_c=in_chans, w_lut=w_lut).to(torch.float16)
+            model_adapter_path = "/home/paperspace/Documents/nika_space/ECCV_RAW_Adapter/extracted_model_adapter_weights.pth"
+            input_level_adapter_path = "/home/paperspace/Documents/nika_space/ECCV_RAW_Adapter/extracted_pre_encoder_weights.pth"
+            if model_adapter_path is not None:
+                print("Loading model adapter:", model_adapter_path)
+                adapter_state = torch.load(model_adapter_path, map_location="cpu")
+                self.model_adapter.load_state_dict(adapter_state, strict=False)
+            if input_level_adapter_path is not None:
+                print("Loading model adapter:", input_level_adapter_path)
+                adapter_state = torch.load(input_level_adapter_path, map_location="cpu")
+                self.pre_encoder.load_state_dict(adapter_state, strict=False)
             # merge the patch embeddings (fea_c = embed_dim) with the adapter features
             self.merge_block = Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=False)
 
@@ -209,7 +220,7 @@ class DinoVisionTransformer(nn.Module):
                 x_raw_feature = x_raw[-1]
             else:
                 x_raw_feature = x_raw
-            ada = self.model_adapter(x_raw_feature)
+            ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
         else:
             ada = None
 
