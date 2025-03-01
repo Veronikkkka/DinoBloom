@@ -41,7 +41,6 @@ class BlockChunk(nn.ModuleList):
             x = b(x)
         return x
 
-
 class DinoVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -66,19 +65,20 @@ class DinoVisionTransformer(nn.Module):
         num_register_tokens=0,
         interpolate_antialias=False,
         interpolate_offset=0.1,
-        # --- RAW adapter parameters ---
+        # RAW adapter parameters
         w_lut=True,
         light_mode='normal',
-        lut_dim=32, 
+        lut_dim=32,
         k_size=3,
         merge_ratio=1.0,
         ada_dim=32,
-        model_adapter_path=None
+        model_adapter_path=None,
+        input_level_adapter_path=None,
     ):
         super().__init__()
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
-        self.num_features = self.embed_dim = embed_dim  # for consistency
+        self.num_features = self.embed_dim = embed_dim
         self.num_tokens = 1
         self.n_blocks = depth
         self.num_heads = num_heads
@@ -87,7 +87,7 @@ class DinoVisionTransformer(nn.Module):
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
 
-        # RAW adapter conf
+        # RAW adapter configuration
         self.w_lut = w_lut
         self.light_mode = light_mode
         self.lut_dim = lut_dim
@@ -95,9 +95,11 @@ class DinoVisionTransformer(nn.Module):
         self.merge_ratio = merge_ratio
         self.ada_dim = ada_dim
 
+        # Patch embedding
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
+        # CLS token and positional embedding
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
         if num_register_tokens > 0:
@@ -110,18 +112,7 @@ class DinoVisionTransformer(nn.Module):
         else:
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
 
-        if ffn_layer == "mlp":
-            logger.info("using MLP layer as FFN")
-            ffn_layer = Mlp
-        elif ffn_layer == "swiglufused" or ffn_layer == "swiglu":
-            logger.info("using SwiGLU layer as FFN")
-            ffn_layer = SwiGLUFFNFused
-        elif ffn_layer == "identity":
-            logger.info("using Identity layer as FFN")
-            ffn_layer = lambda *args, **kwargs: nn.Identity()
-        else:
-            raise NotImplementedError
-
+        # Transformer blocks
         blocks_list = [
             block_fn(
                 dim=embed_dim,
@@ -133,7 +124,6 @@ class DinoVisionTransformer(nn.Module):
                 drop_path=dpr[i],
                 norm_layer=norm_layer,
                 act_layer=act_layer,
-                ffn_layer=ffn_layer,
                 init_values=init_values,
             )
             for i in range(depth)
@@ -143,37 +133,37 @@ class DinoVisionTransformer(nn.Module):
             chunked_blocks = []
             chunksize = depth // block_chunks
             for i in range(0, depth, chunksize):
-                # this is to keep the block index consistent if we chunk the block list
                 chunked_blocks.append([nn.Identity()] * i + blocks_list[i : i + chunksize])
             self.blocks = nn.ModuleList([BlockChunk(p) for p in chunked_blocks])
         else:
             self.chunked_blocks = False
             self.blocks = nn.ModuleList(blocks_list)
 
+        # Final normalization and head
         self.norm = norm_layer(embed_dim)
         self.head = nn.Identity()
 
+        # Mask token
         self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
 
         # Initialize RAW adapter
         if self.w_lut:
             self.pre_encoder = Input_level_Adapeter(mode=light_mode, lut_dim=lut_dim, k_size=k_size, w_lut=w_lut)
-            self.model_adapter = Model_level_Adapeter(in_c=in_chans, w_lut=w_lut).to(torch.float16)
-            model_adapter_path = "/home/paperspace/Documents/nika_space/ECCV_RAW_Adapter/extracted_model_adapter_weights.pth"
-            input_level_adapter_path = "/home/paperspace/Documents/nika_space/ECCV_RAW_Adapter/extracted_pre_encoder_weights.pth"
+            self.model_adapter = Model_level_Adapeter(in_c=in_chans, w_lut=w_lut)
             if model_adapter_path is not None:
                 print("Loading model adapter:", model_adapter_path)
                 adapter_state = torch.load(model_adapter_path, map_location="cpu")
                 self.model_adapter.load_state_dict(adapter_state, strict=False)
             if input_level_adapter_path is not None:
-                print("Loading model adapter:", input_level_adapter_path)
+                print("Loading input-level adapter:", input_level_adapter_path)
                 adapter_state = torch.load(input_level_adapter_path, map_location="cpu")
                 self.pre_encoder.load_state_dict(adapter_state, strict=False)
-            # merge the patch embeddings (fea_c = embed_dim) with the adapter features
+            # Merge block for combining features
             self.merge_block = Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=False)
 
+        # Initialize weights
         self.init_weights()
-        print("STARTED:")
+        print("DinoVisionTransformer initialized.")
 
     def init_weights(self):
         trunc_normal_(self.pos_embed, std=0.02)
@@ -194,8 +184,6 @@ class DinoVisionTransformer(nn.Module):
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
-        # we add a small number to avoid floating point error in the interpolation
-        # see discussion at https://github.com/facebookresearch/dino/issues/8
         w0, h0 = w0 + 0.1, h0 + 0.1
 
         sqrt_N = math.sqrt(N)
@@ -213,45 +201,8 @@ class DinoVisionTransformer(nn.Module):
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
-        # Patch embedding
-        x = self.patch_embed(x)  # [B, num_patches, embed_dim]
-        
-        if masks is not None:
-            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
-        if self.register_tokens is not None:
-            x = torch.cat(
-                (x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1
-            )
-        return x
 
-    def forward_features_list(self, x_list, masks_list):
-        x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
-        for blk in self.blocks:
-            x = blk(x)
-
-        all_x = x
-        output = []
-        for x, masks in zip(all_x, masks_list):
-            x_norm = self.norm(x)
-            output.append(
-                {
-                    "x_norm_clstoken": x_norm[:, 0],
-                    "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
-                    "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
-                    "x_prenorm": x,
-                    "masks": masks,
-                }
-            )
-        return output
-
-    def forward_features(self, x, masks=None):
-        if isinstance(x, list):
-            return self.forward_features_list(x, masks)
-
-        x = self.prepare_tokens_with_masks(x, masks)
-
+        # Pre-encoder and model adapter
         if self.w_lut:
             x_raw = self.pre_encoder(x)
             if isinstance(x_raw, (list, tuple)):
@@ -261,15 +212,31 @@ class DinoVisionTransformer(nn.Module):
             ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
         else:
             ada = None
-        ada = self.model_adapter(x_raw_feature).to(x_raw_feature.dtype)
+
+        # Patch embedding
+        x = self.patch_embed(x)  # [B, num_patches, embed_dim]
+        if masks is not None:
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
+        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = x + self.interpolate_pos_encoding(x, w, h)
+        if self.register_tokens is not None:
+            x = torch.cat(
+                (x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1
+            )
+        return x, ada
+
+    def forward_features(self, x, masks=None):
+        if isinstance(x, list):
+            return self.forward_features_list(x, masks)
+
+        x, ada = self.prepare_tokens_with_masks(x, masks)
 
         for blk in self.blocks:
             x = blk(x)
             if self.w_lut and ada is not None:
-                x = self.merge_block(x, ada, ratio=self.merge_ratio)
+                x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)
 
         x_norm = self.norm(x)
-        print("INSIDE FORWARD")
         return {
             "x_norm_clstoken": x_norm[:, 0],
             "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
@@ -277,6 +244,26 @@ class DinoVisionTransformer(nn.Module):
             "x_prenorm": x,
             "masks": masks,
         }
+
+
+    def forward_features_list(self, x_list, masks_list):
+        outputs = []
+        for x, masks in zip(x_list, masks_list):
+            x, ada = self.prepare_tokens_with_masks(x, masks)
+            for blk in self.blocks:
+                x = blk(x)
+                if self.w_lut and ada is not None:
+                    x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)
+            x_norm = self.norm(x)
+            outputs.append({
+                "x_norm_clstoken": x_norm[:, 0],
+                "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
+                "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
+                "x_prenorm": x,
+                "masks": masks,
+            })
+        return outputs
+
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)

@@ -29,44 +29,66 @@ class Merge_block(BaseModule):
         super(Merge_block, self).__init__()
         self.conv_1 = conv1x1(fea_c + ada_c, mid_c, 1)
         self.conv_2 = conv1x1(mid_c, fea_c, 1)
+        print("FEA C ",fea_c, mid_c, ada_c)
         self.return_ada = return_ada
+        self.adapter_proj = nn.Conv1d(56, 257, kernel_size=1)
+        self.adapter_proj_s = nn.Linear(224, 768)
+        self.proj = nn.Conv2d(8, 800, kernel_size=1)
+        # self.batch_proj = nn.Linear(2 * 257 * 768, 257 * 768)
+        # self.ada_proj = nn.Linear(514, 257)
+        # self.ada_proj = nn.Linear(514, 257) 
+
         if self.return_ada:
             self.conv_3 = conv3x3(mid_c, ada_c * 2, stride=2)
-        
+            
+   
     def forward(self, fea, adapter, ratio=1.0):
-        """
-        Args:
-            fea (Tensor): Feature map from the backbone. Shape (B, fea_c, H, W).
-            adapter (Tensor): Adapter feature map. Shape (B, ada_c, H, W).
-            ratio (float): Merge ratio.
-        Returns:
-            If return_ada is True:
-                (fea_out, new_adapter)
-            Otherwise:
-                (fea_out, None)
-        """
+
         res = fea
-        print("DIMENSIONS:", fea.dim(), adapter.dim(), fea.shape, adapter.shape)
-        if fea.dim() == 3 and adapter.dim() == 4:
-            B = fea.shape[0]
-            C = 256  # or whatever is expected
-            import math
-            H = 24
-            W = 32
-            fea = fea.view(B, C, H, W)
-        adapter = self.channel_reducer(adapter)
-        adapter = adapter.expand(fea.size(0), -1, -1, -1)
-        adapter_resized = F.interpolate(adapter, size=(24, 32), mode='bilinear', align_corners=False)
-        print("DIMENSIONS:", fea.dim(), adapter.dim())
-        fusion = torch.cat([fea, adapter_resized], dim=1)
-        fusion = self.conv_1(fusion)
-        ada = self.conv_2(fusion)
-        fea_out = ratio * ada + res
-        if self.return_ada:
-            new_adapter = self.conv_3(fusion)
-            return fea_out, new_adapter
+        # fea = fea.unsqueeze(-1)
+        
+        print("Fea shape", fea.shape, fea.dim())
+        print("Ada shape", adapter.shape, adapter.dim())
+
+        Ada_reshaped = adapter.squeeze(0).permute(0, 2, 1)
+        print("Ada reshape", Ada_reshaped.shape, adapter.dim())
+
+        Ada_reshaped = Ada_reshaped.to(fea.device)
+        self.adapter_proj = self.adapter_proj.to(fea.device)
+        self.adapter_proj_s = self.adapter_proj_s.to(fea.device)
+       
+
+        print("")
+        Ada_reshaped = self.adapter_proj(Ada_reshaped)
+        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
+        Ada_reshaped = self.adapter_proj_s(Ada_reshaped)
+        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
+        if Ada_reshaped.shape[0] != fea.shape[0]:
+            batch_factor = Ada_reshaped.shape[0] // fea.shape[0]  # = 2
+            Ada_reshaped = Ada_reshaped.view(fea.shape[0], batch_factor, 257, 768)
+        
+            # Average across the batch dimension
+            Ada_reshaped = Ada_reshaped.mean(dim=1) 
+
+        fea = torch.cat([fea, Ada_reshaped], dim=1)
+        fea = self.proj(fea)
+        # ada = self.proj(Ada_reshaped)
+        
+        fea = self.conv_1(fea)
+        ada = self.conv_2(fea)
+        print("Ratio shape", res.shape, ada.shape)
+        # ada = self.ada_proj(ada.permute(0, 2, 1))
+        # ada = ada.permute(0, 2, 1)
+        print("ada after ada_proj", res.shape, Ada_reshaped.shape, ada.shape, fea.shape)
+        fea_out = ratio*ada + fea
+        
+        if self.return_ada: # return adapter for next level
+            ada = self.conv_3(fea)
+            return fea_out, ada
+        
         else:
             return fea_out, None
+
 
 def conv7x7(in_planes: int, out_planes: int, stride: int = 3, groups: int = 1,  padding: int = 3, dilation: int = 1) -> nn.Conv2d:
     """7x7 convolution with padding"""
@@ -105,7 +127,7 @@ class BasicBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
-        x = x.to(self.expand_channels.weight.dtype)
+        # x = x.to(self.expand_channels.weight.dtype)
         out = self.conv1(x)
         # Reshape for LayerNorm
         # C, H, W = out.shape
@@ -169,9 +191,10 @@ class Model_level_Adapeter(BaseModule):
         temp_conv_1 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
         temp_conv_2 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
         temp_conv_3 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-
+        print("HERE HERE")
         if self.w_lut:
-            temp_conv_4 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device)
+            temp_conv_4 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
+            print("HERE HERE 22")
             adapter = torch.cat([
                 temp_conv_1(IMGS[0]), 
                 temp_conv_2(IMGS[1]), 
@@ -186,8 +209,9 @@ class Model_level_Adapeter(BaseModule):
             ], dim=1)
         
         adapter = adapter.half()
-
+        print("HERE HERE 333")
         adapter = self.uni_conv(adapter)
+        print("HERE HERE 44")
         adapter = self.res_1(adapter)   # Residual Block 1 
         adapter = self.res_2(adapter)   # Residual Block 2
         return adapter
@@ -266,6 +290,32 @@ import torch.nn.functional as F
 #         return [feat_full, feat_down1, feat_down2]
 
 
+class CustomLayerNorm(nn.Module):
+    def __init__(self, normalized_shape):
+        super().__init__()
+        self.norm = nn.LayerNorm(normalized_shape)
+        
+    def forward(self, x):
+        # Input has shape [B, S, D] or [B, C, H, W]
+        if len(x.shape) == 3:  # [B, S, D] or [B, C, S]
+            if x.shape[1] == self.norm.normalized_shape[0]:
+                # This is [B, C, S] format, need to transpose
+                x = x.transpose(1, 2)  # Now [B, S, C]
+                x = self.norm(x)
+                x = x.transpose(1, 2)  # Back to [B, C, S]
+            else:
+                # Already in [B, S, C] format
+                x = self.norm(x)
+        elif len(x.shape) == 4:  # [B, C, H, W]
+            b, c, h, w = x.shape
+            # Reshape to [B, H*W, C]
+            x = x.permute(0, 2, 3, 1).reshape(b, h*w, c)
+            # Apply norm
+            x = self.norm(x)
+            # Reshape back to [B, C, H, W]
+            x = x.reshape(b, h, w, c).permute(0, 3, 1, 2)
+        return x
+
 # Predictor P_K
 class Kernel_Predictor(nn.Module):
     def __init__(self, dim, mode='low', num_heads=1, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -276,7 +326,7 @@ class Kernel_Predictor(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
         # Query Adaptive Learning (QAL)
         self.q = nn.Parameter(torch.rand((1, 4, dim)), requires_grad=True)
-
+        # self.input_proj = nn.Conv2d(16, 3, kernel_size=1) 
         self.kv_downsample = nn.Sequential(
             nn.Conv2d(3, dim // 8, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(1, dim // 8),  # replaced BatchNorm2d with GroupNorm
@@ -290,6 +340,7 @@ class Kernel_Predictor(nn.Module):
             nn.Conv2d(dim // 2, dim, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(1, dim),
         )
+
         self.k = nn.Linear(dim, dim, bias=qkv_bias)
         self.v = nn.Linear(dim, dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -309,6 +360,12 @@ class Kernel_Predictor(nn.Module):
         self.r2_base = nn.Parameter(torch.FloatTensor([2]), requires_grad=False)
 
     def forward(self, x):
+        # print("X type: ", type(x), x.dim)
+        # x = x[0]
+        # x = self.input_proj(x)
+        # output = self.kv_downsample(x)
+        # print("Output type: ", type(output))  # This should print <class 'torch.Tensor'>, but it might print <class 'list'>
+
         d_x = self.kv_downsample(x).flatten(2).transpose(1, 2)  # [B, N, C]
         B, N, C = d_x.shape
         k = self.k(d_x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
