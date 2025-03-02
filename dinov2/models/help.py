@@ -31,9 +31,13 @@ class Merge_block(BaseModule):
         self.conv_2 = conv1x1(mid_c, fea_c, 1)
         print("FEA C ",fea_c, mid_c, ada_c)
         self.return_ada = return_ada
-        self.adapter_proj = nn.Conv1d(56, 257, kernel_size=1)
-        self.adapter_proj_s = nn.Linear(224, 768)
-        self.proj = nn.Conv2d(8, 800, kernel_size=1)
+        # self.adapter_proj = nn.Conv1d(56, 257, kernel_size=1)
+        self.adapter_proj = None 
+        # self.adapter_proj_s = nn.Linear(224, 768)
+        self.adapter_proj_s = None  
+        # first - batch 
+        # self.proj = nn.Conv2d(8, 800, kernel_size=1)
+        self.proj = None
         # self.batch_proj = nn.Linear(2 * 257 * 768, 257 * 768)
         # self.ada_proj = nn.Linear(514, 257)
         # self.ada_proj = nn.Linear(514, 257) 
@@ -47,30 +51,48 @@ class Merge_block(BaseModule):
         res = fea
         # fea = fea.unsqueeze(-1)
         
-        print("Fea shape", fea.shape, fea.dim())
+        print("Fea shape", fea.shape, fea.dim(), fea.device)
         print("Ada shape", adapter.shape, adapter.dim())
 
-        Ada_reshaped = adapter.squeeze(0).permute(0, 2, 1)
+        Ada_reshaped = adapter.squeeze(0).permute(0, 2, 1).to(fea.device)
         print("Ada reshape", Ada_reshaped.shape, adapter.dim())
 
-        Ada_reshaped = Ada_reshaped.to(fea.device)
-        self.adapter_proj = self.adapter_proj.to(fea.device)
-        self.adapter_proj_s = self.adapter_proj_s.to(fea.device)
+        # Ada_reshaped = Ada_reshaped.to(fea.device)
+        # self.adapter_proj = self.adapter_proj.to(fea.device)
+        # self.adapter_proj_s = self.adapter_proj_s.to(fea.device)
        
 
-        print("")
+        B, C, N = Ada_reshaped.shape 
+        if self.adapter_proj is None or self.adapter_proj.in_channels != C:
+            self.adapter_proj = nn.Conv1d(C, 257, kernel_size=1).to(Ada_reshaped.device)
+            self.adapter_proj = self.adapter_proj.to(Ada_reshaped.dtype)
+            print("Proj device", Ada_reshaped.device, fea.device)
         Ada_reshaped = self.adapter_proj(Ada_reshaped)
+
         print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
+
+        if self.adapter_proj_s is None:
+            print(f"Initializing adapter_proj_s with input dim {C} and output dim 768")
+            self.adapter_proj_s = nn.Linear(Ada_reshaped.shape[2], 768).to(Ada_reshaped.device).to(Ada_reshaped.dtype)
+
         Ada_reshaped = self.adapter_proj_s(Ada_reshaped)
         print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
-        if Ada_reshaped.shape[0] != fea.shape[0]:
-            batch_factor = Ada_reshaped.shape[0] // fea.shape[0]  # = 2
-            Ada_reshaped = Ada_reshaped.view(fea.shape[0], batch_factor, 257, 768)
-        
-            # Average across the batch dimension
-            Ada_reshaped = Ada_reshaped.mean(dim=1) 
 
+        if Ada_reshaped.shape[0] != fea.shape[0]:
+            batch_factor = fea.shape[0] // Ada_reshaped.shape[0]
+            if batch_factor > 1:
+ 
+                Ada_reshaped = Ada_reshaped.repeat(batch_factor, 1, 1)
+            else:
+                Ada_reshaped = Ada_reshaped.mean(dim=0, keepdim=True).repeat(fea.shape[0], 1, 1)
+
+        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
         fea = torch.cat([fea, Ada_reshaped], dim=1)
+
+        if self.proj is None or self.proj.in_channels != fea.shape[1]:
+            print(f"Initializing self.proj with input dim {fea.shape[0]} and output dim 800")
+            self.proj = nn.Conv2d(fea.shape[0], 800, kernel_size=1).to(fea.device).to(fea.dtype)
+
         fea = self.proj(fea)
         # ada = self.proj(Ada_reshaped)
         
@@ -194,7 +216,7 @@ class Model_level_Adapeter(BaseModule):
         print("HERE HERE")
         if self.w_lut:
             temp_conv_4 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-            print("HERE HERE 22")
+            print("HERE HERE 22", len(IMGS))
             adapter = torch.cat([
                 temp_conv_1(IMGS[0]), 
                 temp_conv_2(IMGS[1]), 

@@ -102,16 +102,32 @@ class DinoVisionTransformer(nn.Module):
         # CLS token and positional embedding
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
-        if num_register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim))
-        else:
-            self.register_tokens = None
+        assert num_register_tokens >= 0
+        self.register_tokens = (
+            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
+        )
 
         if drop_path_uniform is True:
             dpr = [drop_path_rate] * depth
         else:
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
 
+        if ffn_layer == "mlp":
+            logger.info("using MLP layer as FFN")
+            ffn_layer = Mlp
+        elif ffn_layer == "swiglufused" or ffn_layer == "swiglu":
+            logger.info("using SwiGLU layer as FFN")
+            ffn_layer = SwiGLUFFNFused
+        elif ffn_layer == "identity":
+            logger.info("using Identity layer as FFN")
+
+            def f(*args, **kwargs):
+                return nn.Identity()
+
+            ffn_layer = f
+        else:
+            raise NotImplementedError
+        
         # Transformer blocks
         blocks_list = [
             block_fn(
@@ -159,7 +175,11 @@ class DinoVisionTransformer(nn.Module):
                 adapter_state = torch.load(input_level_adapter_path, map_location="cpu")
                 self.pre_encoder.load_state_dict(adapter_state, strict=False)
             # Merge block for combining features
-            self.merge_block = Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=False)
+            self.merge_blocks = nn.ModuleList([
+                Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=True),
+                Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=True),
+                Merge_block(fea_c=embed_dim, ada_c=ada_dim, mid_c=embed_dim, return_ada=False),
+            ])
 
         # Initialize weights
         self.init_weights()
@@ -224,17 +244,19 @@ class DinoVisionTransformer(nn.Module):
                 (x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1
             )
         return x, ada
+        # return x
 
     def forward_features(self, x, masks=None):
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
         x, ada = self.prepare_tokens_with_masks(x, masks)
+        # x = self.prepare_tokens_with_masks(x, masks)
 
         for blk in self.blocks:
             x = blk(x)
-            if self.w_lut and ada is not None:
-                x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)
+            # if self.w_lut and ada is not None:
+            #     x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)
 
         x_norm = self.norm(x)
         return {
@@ -250,10 +272,14 @@ class DinoVisionTransformer(nn.Module):
         outputs = []
         for x, masks in zip(x_list, masks_list):
             x, ada = self.prepare_tokens_with_masks(x, masks)
-            for blk in self.blocks:
+            # x = self.prepare_tokens_with_masks(x, masks)
+            for i, blk in enumerate(self.blocks):
                 x = blk(x)
-                if self.w_lut and ada is not None:
-                    x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)
+                # if self.w_lut and ada is not None:
+                #     x, ada = self.merge_block(x, ada, ratio=self.merge_ratio)                
+                if self.w_lut and ada is not None and i < len(self.merge_blocks):
+                    x, ada = self.merge_blocks[i](x, ada, ratio=self.merge_ratio)
+
             x_norm = self.norm(x)
             outputs.append({
                 "x_norm_clstoken": x_norm[:, 0],
