@@ -7,9 +7,9 @@ class BaseModule(nn.Module):
     def __init__(self):
         super(BaseModule, self).__init__()
 
-def conv1x1(in_channels, out_channels, stride=1):
-    """1x1 convolution with no bias."""
-    return nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 def conv3x3(in_channels, out_channels, stride=1, padding=1):
     """3x3 convolution with no bias."""
@@ -19,97 +19,41 @@ from torch import Tensor
 
 class Merge_block(BaseModule):
     def __init__(self, fea_c, ada_c, mid_c, return_ada=True):
-        """
-        Args:
-            fea_c (int): Number of channels in the feature map (e.g. patch tokens).
-            ada_c (int): Number of channels in the adapter feature map.
-            mid_c (int): Intermediate channel number for fusion.
-            return_ada (bool): Whether to output an updated adapter for cascading.
-        """
         super(Merge_block, self).__init__()
-        self.conv_1 = conv1x1(fea_c + ada_c, mid_c, 1)
-        self.conv_2 = conv1x1(mid_c, fea_c, 1)
-        print("FEA C ",fea_c, mid_c, ada_c)
+
+        self.fea_c = fea_c
+        self.ada_c = ada_c
+        # 784 - embedded dim + adapter_c
+        self.embeded_dim = 768
+        self.fc_1 = nn.Linear(self.embeded_dim + ada_c, mid_c)
+        self.fc_2 = nn.Linear(mid_c, self.embeded_dim)
         self.return_ada = return_ada
-        # self.adapter_proj = nn.Conv1d(56, 257, kernel_size=1)
-        self.adapter_proj = None 
-        # self.adapter_proj_s = nn.Linear(224, 768)
-        self.adapter_proj_s = None  
-        # first - batch 
-        # self.proj = nn.Conv2d(8, 800, kernel_size=1)
-        self.proj = None
-        # self.batch_proj = nn.Linear(2 * 257 * 768, 257 * 768)
-        # self.ada_proj = nn.Linear(514, 257)
-        # self.ada_proj = nn.Linear(514, 257) 
 
         if self.return_ada:
-            self.conv_3 = conv3x3(mid_c, ada_c * 2, stride=2)
-            
-   
+            self.conv_3 = nn.Conv1d(mid_c, ada_c * 2, kernel_size=1)  # 1D Conv instead of 3x3
+        else:
+            self.conv_3 = None
+
     def forward(self, fea, adapter, ratio=1.0):
-
         res = fea
-        # fea = fea.unsqueeze(-1)
+        # print("Before concatenation: ", fea.shape, adapter.shape, self.fea_c, self.ada_c)
+
+        fea = torch.cat([fea, adapter], dim=-1)  # (B, seq_len, fea_c + ada_c)
         
-        print("Fea shape", fea.shape, fea.dim(), fea.device)
-        print("Ada shape", adapter.shape, adapter.dim())
+        B, seq_len, C = fea.shape
+        fea = fea.view(B * seq_len, C) 
+        fea = self.fc_1(fea) 
+        fea = fea.view(B, seq_len, -1)  
+        ada = self.fc_2(fea)  
+        fea_out = ratio * ada + res
 
-        Ada_reshaped = adapter.squeeze(0).permute(0, 2, 1).to(fea.device)
-        print("Ada reshape", Ada_reshaped.shape, adapter.dim())
-
-        # Ada_reshaped = Ada_reshaped.to(fea.device)
-        # self.adapter_proj = self.adapter_proj.to(fea.device)
-        # self.adapter_proj_s = self.adapter_proj_s.to(fea.device)
-       
-
-        B, C, N = Ada_reshaped.shape 
-        if self.adapter_proj is None or self.adapter_proj.in_channels != C:
-            self.adapter_proj = nn.Conv1d(C, 257, kernel_size=1).to(Ada_reshaped.device)
-            self.adapter_proj = self.adapter_proj.to(Ada_reshaped.dtype)
-            print("Proj device", Ada_reshaped.device, fea.device)
-        Ada_reshaped = self.adapter_proj(Ada_reshaped)
-
-        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
-
-        if self.adapter_proj_s is None:
-            print(f"Initializing adapter_proj_s with input dim {C} and output dim 768")
-            self.adapter_proj_s = nn.Linear(Ada_reshaped.shape[2], 768).to(Ada_reshaped.device).to(Ada_reshaped.dtype)
-
-        Ada_reshaped = self.adapter_proj_s(Ada_reshaped)
-        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
-
-        if Ada_reshaped.shape[0] != fea.shape[0]:
-            batch_factor = fea.shape[0] // Ada_reshaped.shape[0]
-            if batch_factor > 1:
- 
-                Ada_reshaped = Ada_reshaped.repeat(batch_factor, 1, 1)
-            else:
-                Ada_reshaped = Ada_reshaped.mean(dim=0, keepdim=True).repeat(fea.shape[0], 1, 1)
-
-        print("Ada reshaped: ", Ada_reshaped.shape, fea.shape)
-        fea = torch.cat([fea, Ada_reshaped], dim=1)
-
-        if self.proj is None or self.proj.in_channels != fea.shape[1]:
-            print(f"Initializing self.proj with input dim {fea.shape[0]} and output dim 800")
-            self.proj = nn.Conv2d(fea.shape[0], 800, kernel_size=1).to(fea.device).to(fea.dtype)
-
-        fea = self.proj(fea)
-        # ada = self.proj(Ada_reshaped)
-        
-        fea = self.conv_1(fea)
-        ada = self.conv_2(fea)
-        print("Ratio shape", res.shape, ada.shape)
-        # ada = self.ada_proj(ada.permute(0, 2, 1))
-        # ada = ada.permute(0, 2, 1)
-        print("ada after ada_proj", res.shape, Ada_reshaped.shape, ada.shape, fea.shape)
-        fea_out = ratio*ada + fea
-        
-        if self.return_ada: # return adapter for next level
-            ada = self.conv_3(fea)
-            return fea_out, ada
-        
+        if self.return_ada:
+           
+            ada = self.conv_3(fea.permute(0, 2, 1))
+            return fea_out, ada.permute(0, 2, 1)
         else:
             return fea_out, None
+
 
 
 def conv7x7(in_planes: int, out_planes: int, stride: int = 3, groups: int = 1,  padding: int = 3, dilation: int = 1) -> nn.Conv2d:
@@ -178,65 +122,93 @@ class BasicBlock(nn.Module):
         return out
 
 class Model_level_Adapeter(BaseModule):
-    def __init__(self, in_c=12, in_dim=16, w_lut=True):
+    def __init__(self, in_c=3, in_dim=8, w_lut=True):
         super(Model_level_Adapeter, self).__init__()
         self.conv_1 = conv3x3(in_c, in_c, 2)
         self.conv_2 = conv3x3(in_c, in_c, 2)
         self.conv_3 = conv3x3(in_c, in_c, 2)
         self.w_lut = w_lut
-        if self.w_lut:
+        if self.w_lut:  # With LUT: I1, I2, I3, I4
             self.conv_4 = conv3x3(in_c, in_c, 2)
-            self.channel_reducer = conv7x7(272, in_dim, 2, padding=3)
-            self.uni_conv = conv7x7(12, in_dim, 2, padding=3)
-        else:
+            self.uni_conv = conv7x7(4*in_c, in_dim, 2, padding=3)
+        else:  # Without LUT: I1, I2, I3
             self.uni_conv = conv7x7(3*in_c, in_dim, 2, padding=3)
 
-        self.res_1 = BasicBlock(inplanes=in_dim, planes=in_dim)
-        self.res_2 = BasicBlock(inplanes=in_dim, planes=in_dim)
-        self.expand_channels = nn.Conv2d(3, 32, kernel_size=1, stride=1, padding=0).to(torch.float16)
+        # self.res_1 = BasicBlock(inplanes=in_dim, planes=in_dim)
+        # self.res_2 = BasicBlock(inplanes=in_dim, planes=in_dim)
 
     def forward(self, IMGS):
-        device = IMGS[0].device 
-        print("DEVICE", device)
-        IMGS = [img.to(torch.float16) for img in IMGS]
-
-        reduce_channels = nn.Conv2d(32, 12, kernel_size=1, bias=False).to(device).to(torch.float16)
-
-        IMGS = [img.to(self.expand_channels.weight.dtype) for img in IMGS]
-        print("Types: ", IMGS[0].dtype, self.expand_channels.weight.dtype)
-        
-        IMGS = [reduce_channels(self.expand_channels(img)) for img in IMGS]
-
-        print(f"After first reduction: {IMGS[0].shape}")
-        
-
-        temp_conv_1 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-        temp_conv_2 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-        temp_conv_3 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-        print("HERE HERE")
         if self.w_lut:
-            temp_conv_4 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
-            print("HERE HERE 22", len(IMGS))
-            adapter = torch.cat([
-                temp_conv_1(IMGS[0]), 
-                temp_conv_2(IMGS[1]), 
-                temp_conv_3(IMGS[2]), 
-                temp_conv_4(IMGS[3])
-            ], dim=1)
+            adapter = torch.cat([self.conv_1(IMGS[0]), self.conv_2(IMGS[1]), self.conv_3(IMGS[2]), self.conv_4(IMGS[3])], dim=1)
+
         else:
-            adapter = torch.cat([
-                temp_conv_1(IMGS[0]), 
-                temp_conv_2(IMGS[1]), 
-                temp_conv_3(IMGS[2])
-            ], dim=1)
+            adapter = torch.cat([self.conv_1(IMGS[0]), self.conv_2(IMGS[1]), self.conv_3(IMGS[2])], dim=1)
         
-        adapter = adapter.half()
-        print("HERE HERE 333")
         adapter = self.uni_conv(adapter)
-        print("HERE HERE 44")
-        adapter = self.res_1(adapter)   # Residual Block 1 
-        adapter = self.res_2(adapter)   # Residual Block 2
+        # adapter = self.res_1(adapter)
+        # adapter = self.res_2(adapter)
         return adapter
+
+# class Model_level_Adapeter(BaseModule):
+#     def __init__(self, in_c=12, in_dim=16, w_lut=True):
+#         super(Model_level_Adapeter, self).__init__()
+#         self.conv_1 = conv3x3(in_c, in_c, 2)
+#         self.conv_2 = conv3x3(in_c, in_c, 2)
+#         self.conv_3 = conv3x3(in_c, in_c, 2)
+#         self.w_lut = w_lut
+#         if self.w_lut:
+#             self.conv_4 = conv3x3(in_c, in_c, 2)
+#             self.channel_reducer = conv7x7(272, in_dim, 2, padding=3)
+#             self.uni_conv = conv7x7(12, in_dim, 2, padding=3)
+#         else:
+#             self.uni_conv = conv7x7(3*in_c, in_dim, 2, padding=3)
+
+#         self.res_1 = BasicBlock(inplanes=in_dim, planes=in_dim)
+#         self.res_2 = BasicBlock(inplanes=in_dim, planes=in_dim)
+#         self.expand_channels = nn.Conv2d(3, 32, kernel_size=1, stride=1, padding=0).to(torch.float16)
+
+#     def forward(self, IMGS):
+#         device = IMGS[0].device 
+#         print("DEVICE", device)
+#         IMGS = [img.to(torch.float16) for img in IMGS]
+
+#         reduce_channels = nn.Conv2d(32, 12, kernel_size=1, bias=False).to(device).to(torch.float16)
+
+#         IMGS = [img.to(self.expand_channels.weight.dtype) for img in IMGS]
+#         print("Types: ", IMGS[0].dtype, self.expand_channels.weight.dtype)
+        
+#         IMGS = [reduce_channels(self.expand_channels(img)) for img in IMGS]
+
+#         print(f"After first reduction: {IMGS[0].shape}")
+        
+
+#         temp_conv_1 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
+#         temp_conv_2 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
+#         temp_conv_3 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
+#         print("HERE HERE")
+#         if self.w_lut:
+#             temp_conv_4 = nn.Conv2d(12, 12, kernel_size=3, stride=2, padding=1, bias=False).to(device).to(torch.float16)
+#             print("HERE HERE 22", len(IMGS))
+#             adapter = torch.cat([
+#                 temp_conv_1(IMGS[0]), 
+#                 temp_conv_2(IMGS[1]), 
+#                 temp_conv_3(IMGS[2]), 
+#                 temp_conv_4(IMGS[3])
+#             ], dim=1)
+#         else:
+#             adapter = torch.cat([
+#                 temp_conv_1(IMGS[0]), 
+#                 temp_conv_2(IMGS[1]), 
+#                 temp_conv_3(IMGS[2])
+#             ], dim=1)
+        
+#         adapter = adapter.half()
+#         print("HERE HERE 333")
+#         adapter = self.uni_conv(adapter)
+#         print("HERE HERE 44")
+#         adapter = self.res_1(adapter)   # Residual Block 1 
+#         adapter = self.res_2(adapter)   # Residual Block 2
+#         return adapter
 
 import torch
 import torch.nn as nn
@@ -623,7 +595,7 @@ def WB_CCM(I2, ccm_matrix, distance):
             torch.stack([out_I4[i] for i in range(I2.shape[0])], dim=0)
 
 class VitInputLevelAdapter(nn.Module):
-    def __init__(self, mode='normal', lut_dim=32, k_size=3, w_lut=True):
+    def __init__(self, mode='normal', lut_dim=32, out='all', k_size=3, w_lut=True):
         """
         Args:
             mode (str): Operating mode, e.g. 'normal' for normal/over-exposure or 'low' for low-light.
@@ -641,27 +613,30 @@ class VitInputLevelAdapter(nn.Module):
             print("hidden_features", lut_dim)
             # self.LUT = nn.Linear(224, 32)
         self.k_size = k_size
+        self.out = out
 
     def forward(self, I1):
-        
+        # (1). I1 --> I2: Denoise & Enhancement & Sharpen
         r1, r2, gain, sigma = self.Predictor_K(I1)
-        I2 = Gain_Denoise(I1, r1, r2, gain, sigma, k_size=self.k_size)  # [B, C, H, W]
-        I2 = torch.clamp(I2, 1e-5, 1.0)
+        I2 = Gain_Denoise(I1, r1, r2, gain, sigma, k_size=self.k_size)  # (B,C,H,W)
+        I2 = torch.clamp(I2, 1e-5, 1.0) # normal & over-exposure
         
         ccm_matrix, distance = self.Predictor_M(I2)
-        I3, I4 = WB_CCM(I2, ccm_matrix, distance)  
-        I3 = I3.permute(0, 3, 1, 2)
-        I4 = I4.permute(0, 3, 1, 2)
+        # (2). I2 --> I3: White Balance, Shade of Gray
+        # (3). I3 --> I4: Camera Colour Matrix Transformation
+        I3, I4 = WB_CCM(I2, ccm_matrix, distance) # (B,H,W,C)
         
         if self.w_lut:
-            B, C, H, W = I4.shape
-            I4_reshaped = I4.permute(0, 2, 3, 1).reshape(-1, C)  # [B*H*W, C]
-
-            I5_reshaped = self.LUT(I4_reshaped)  # [B*H*W, C]
+        # (4). I4 --> I5: Implicit Neural LUT
+            I5 = self.LUT(I4).permute(0,3,1,2)
             
-            I5 = I5_reshaped.reshape(B, H, W, C).permute(0, 3, 1, 2)
-            
-            return I5 
+            if self.out == 'all':   # return all features
+                return [I1, I2, I3.permute(0,3,1,2), I4.permute(0,3,1,2), I5]
+            else:   # only return I5
+                return [I5]
+        
         else:
-            # If LUT is disabled, use I4 as the final output.
-            return I4
+            if self.out == 'all':
+                return [I1, I2, I3.permute(0,3,1,2), I4.permute(0,3,1,2)]
+            else:
+                return [I4.permute(0,3,1,2)]
