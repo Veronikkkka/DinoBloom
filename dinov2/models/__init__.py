@@ -26,6 +26,7 @@ def build_model(args, only_teacher=False, img_size=224):
             interpolate_offset=args.interpolate_offset,
             interpolate_antialias=args.interpolate_antialias,
         )
+        print(vits.__dict__.keys())
         teacher = vits.__dict__[args.arch](**vit_kwargs)
         if only_teacher:
             return teacher, teacher.embed_dim

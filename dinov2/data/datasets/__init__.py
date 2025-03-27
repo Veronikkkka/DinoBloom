@@ -4,4 +4,5 @@
 # found in the LICENSE file in the root directory of this source tree.
 
 from .hema_data import HemaStandardDataset
+from .my_dataset import ADK20Dataset
 

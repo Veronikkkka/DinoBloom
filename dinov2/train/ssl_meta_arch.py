@@ -81,6 +81,7 @@ def get_downloaded_dino_vit_interpolated(modelname="dinov2_vits14"):
 
     model = torch.hub.load("facebookresearch/dinov2", modelname)  #
     input_tensor = model.pos_embed
+    input_tensor = input_tensor.to('cuda') 
     tensor_corr_shape = interpolate_pos_encoding(input_tensor, 16, 16)
     pos_embed = nn.Parameter(torch.zeros(1, 257))
     pos_embed.data = tensor_corr_shape
@@ -92,6 +93,7 @@ class SSLMetaArch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        # less memory by number
         self.fp16_scaler = ShardedGradScaler() if cfg.compute_precision.grad_scaler else None
 
         student_model_dict = dict()
@@ -463,12 +465,24 @@ class SSLMetaArch(nn.Module):
 
     def prepare_for_distributed_training(self):
         logger.info("DISTRIBUTED FSDP -- preparing model for distributed training")
+        print("Student", self.student)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
         if has_batchnorms(self.student):
             raise NotImplementedError
         # below will synchronize all student subnetworks across gpus:
+        print("Moving student and teacher models to device:", device)
+        self.student = self.student.to(device)
+        self.teacher = self.teacher.to(device)
+        # print("self: ", self.student.items())
         for k, v in self.student.items():
             self.teacher[k].load_state_dict(self.student[k].state_dict())
+            # Ensure that all parameters in self.student[k] and self.teacher[k] require gradients.
+            for param in self.student[k].parameters():
+                param.requires_grad = True
+            for param in self.teacher[k].parameters():
+                param.requires_grad = True
             student_model_cfg = self.cfg.compute_precision.student[k]
+            
             self.student[k] = get_fsdp_wrapper(student_model_cfg, modules_to_wrap={BlockChunk})(self.student[k])
             teacher_model_cfg = self.cfg.compute_precision.teacher[k]
             self.teacher[k] = get_fsdp_wrapper(teacher_model_cfg, modules_to_wrap={BlockChunk})(self.teacher[k])

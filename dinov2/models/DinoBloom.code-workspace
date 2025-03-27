@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../ECCV_RAW_Adapter"
+		},
+		{
+			"path": "../../../dinov2"
+		},
+		{
+			"path": "../../../ADE20K/ADEChallengeData2016/images"
+		}
+	],
+	"settings": {}
+}
