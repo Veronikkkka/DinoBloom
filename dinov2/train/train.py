@@ -144,6 +144,7 @@ def do_test(cfg, model, iteration):
 
 
 def do_train(cfg, model, resume=False):
+    model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu") )
     model.train()
     inputs_dtype = torch.half
     fp16_scaler = model.fp16_scaler  # for mixed precision training
@@ -191,6 +192,8 @@ def do_train(cfg, model, resume=False):
             global_crops_size=cfg.crops.global_crops_size,
             local_crops_size=cfg.crops.local_crops_size,
         )
+
+    #diff with original
     elif cfg.data_transform == "hema":
         data_transform = DataAugmentationHEMA(
             cfg.crops.global_crops_scale,
@@ -230,7 +233,7 @@ def do_train(cfg, model, resume=False):
         drop_last=True,
         collate_fn=collate_fn,
     )
-
+    print("Dataloader", len(data_loader))
     # training loop
 
     iteration = start_iter
@@ -250,13 +253,17 @@ def do_train(cfg, model, resume=False):
         max_iter,
         start_iter,
     ):
+        #count device for more correct batch size
         current_batch_size = (data["collated_global_crops"].shape[0] / 2) * torch.cuda.device_count()
+        
         if iteration > max_iter:
             return
 
         # apply schedules
 
         lr = lr_schedule[iteration]
+        print("BATCH SIZE", current_batch_size, lr)
+        # print(lr)
         wd = wd_schedule[iteration]
         mom = momentum_schedule[iteration]
         teacher_temp = teacher_temp_schedule[iteration]
@@ -266,8 +273,10 @@ def do_train(cfg, model, resume=False):
         # compute losses
 
         optimizer.zero_grad(set_to_none=True)
+        #in original doesnt have class tokens here
         loss_dict, class_tokens = model.forward_backward(data, teacher_temp=teacher_temp)
 
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         if fp16_scaler is not None:
             if cfg.optim.clip_grad:
                 fp16_scaler.unscale_(optimizer)
@@ -292,6 +301,15 @@ def do_train(cfg, model, resume=False):
                 torch.distributed.all_reduce(v)
         loss_dict_reduced = {k: v.item() / distributed.get_global_size() for k, v in loss_dict.items()}
 
+        for name, param in model.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                print(f"NaN gradient detected in {name}")
+
+        # Add before NaN check
+        for k, v in loss_dict_reduced.items():
+            if math.isnan(v):
+                print(f"NaN detected in loss component: {k}")
+        
         if math.isnan(sum(loss_dict_reduced.values())):
             logger.info("NaN detected")
             raise AssertionError
@@ -304,7 +322,8 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(current_batch_size=current_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
 
-        wandb.log(
+        # not in original
+        (
             {
                 "lr": lr,
                 "wd": wd,
@@ -318,30 +337,32 @@ def do_train(cfg, model, resume=False):
 
         # compute smooth rank measure
 
-        desired_tokens = 2500
-        tokens_needed = desired_tokens - total_tokens_collected
-        batch_size = class_tokens.shape[0]  # Current batch size from class_tokens shape
+        # desired_tokens = 2500
+        # tokens_needed = desired_tokens - total_tokens_collected
+        # batch_size = class_tokens.shape[0]  # Current batch size from class_tokens shape
 
-        if tokens_needed > 0 and iteration % 1000 < (int(desired_tokens / batch_size) + 1):
-            # If the whole batch can be added without exceeding 1000 tokens
-            if batch_size <= tokens_needed:
-                batch_collection.append(class_tokens.detach())
-                total_tokens_collected += batch_size
-            else:
-                # Add only the required number of tokens from the batch
-                batch_collection.append(class_tokens.detach()[:tokens_needed, :])
-                total_tokens_collected += tokens_needed
+        # if tokens_needed > 0 and iteration % 1000 < (int(desired_tokens / batch_size) + 1):
+        #     # If the whole batch can be added without exceeding 1000 tokens
+        #     if batch_size <= tokens_needed:
+        #         batch_collection.append(class_tokens.detach())
+        #         total_tokens_collected += batch_size
+        #     else:
+        #         # Add only the required number of tokens from the batch
+        #         batch_collection.append(class_tokens.detach()[:tokens_needed, :])
+        #         total_tokens_collected += tokens_needed
 
-            print(f"{tokens_needed} tokens needed, {total_tokens_collected }tokens collected")
+        #     print(f"{tokens_needed} tokens needed, {total_tokens_collected }tokens collected")
 
-        # Once desired_tokens are collected, process them
-        if total_tokens_collected == desired_tokens:
-            embedding_matrix = torch.cat(batch_collection, dim=0)
-            smooth_rank = smooth_rank_measure(embedding_matrix)  # Assuming this function is defined elsewhere
-            wandb.log({"smooth_rank": smooth_rank})
-            # Reset for the next tokens
-            batch_collection = []
-            total_tokens_collected = 0
+        # # Once desired_tokens are collected, process them
+        # if total_tokens_collected == desired_tokens:
+        #     embedding_matrix = torch.cat(batch_collection, dim=0)
+        #     smooth_rank = smooth_rank_measure(embedding_matrix)  # Assuming this function is defined elsewhere
+        #     # wandb.log({"smooth_rank": smooth_rank})
+        #     # Reset for the next tokens
+        #     batch_collection = []
+        #     total_tokens_collected = 0
+        
+        #to here
 
         if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
             do_test(cfg, model, f"training_{iteration}")
@@ -357,18 +378,20 @@ def main(args):
     cfg = setup(args)
 
     model = SSLMetaArch(cfg).to(torch.device("cuda"))
+    model = model.to(torch.float16)
     model.prepare_for_distributed_training()
 
-    logger.info("Model:\n{}".format(model))
-    if args.eval_only:
-        iteration = (
-            FSDPCheckpointer(model, save_dir=cfg.train.output_dir)
-            .resume_or_load(cfg.MODEL.WEIGHTS, resume=not args.no_resume)
-            .get("iteration", -1)
-            + 1
-        )
-        return do_test(cfg, model, f"manual_{iteration}")
+    # logger.info("Model:\n{}".format(model))
+    # if args.eval_only:
+    #     iteration = (
+    #         FSDPCheckpointer(model, save_dir=cfg.train.output_dir)
+    #         .resume_or_load(cfg.MODEL.WEIGHTS, resume=not args.no_resume)
+    #         .get("iteration", -1)
+    #         + 1
+    #     )
+    #     return do_test(cfg, model, f"manual_{iteration}")
 
+    # model = model.float()
     do_train(cfg, model, resume=not args.no_resume)
 
 
@@ -376,5 +399,6 @@ if __name__ == "__main__":
     args = get_args_parser(add_help=True).parse_args()
     name = args.name if args.name != "debug" else args.name
     args.output_dir = os.path.join(args.output_dir, name)
-    wandb.init(entity="histo-collab", project="dinov2", name=name, mode="online", config=args)
+    # wandb.init(entity="histo-collab", project="dinov2", name=name, mode="online", config=args)
     main(args)
+# wandb.log

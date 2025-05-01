@@ -13,7 +13,7 @@ from .transforms import GaussianBlur, make_normalize_transform
 
 logger = logging.getLogger("dinov2")
 
-
+from dinov2.train.rgb_to_raw import rgb_to_raw, raw_to_rgb
 class DataAugmentationDINO(object):
     def __init__(
         self,
@@ -106,7 +106,11 @@ class DataAugmentationDINO(object):
 
     def __call__(self, image):
         output = {}
-
+        # print(type(image))
+        # raw_image = rgb_to_raw(img=image)
+        # after_raw = raw_to_rgb(raw_image)
+        # print("TYPES", type(image), type(after_raw))
+        # image = after_raw
         # global crops:
         im1_base = self.geometric_augmentation_global(image)
         global_crop_1 = self.global_transfo1(im1_base)

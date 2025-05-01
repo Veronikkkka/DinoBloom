@@ -28,7 +28,7 @@ class HemaStandardDataset(VisionDataset):
         self.patches = []
 
         all_dataset_files = Path(root).glob("*.txt")
-
+        print(all_dataset_files)
         for dataset_file in all_dataset_files:
             print("Loading ", dataset_file)
             with open(dataset_file, "r") as file:

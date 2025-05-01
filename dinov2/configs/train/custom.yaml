@@ -46,10 +46,10 @@ ibot:
   #head_n_prototypes: 131072
 data_transform: "default"
 train:
-  batch_size_per_gpu: 120 #vitg 26+, vitl: 56, vits:152, vitb:120 for 8 node
-  num_workers: 124
-  OFFICIAL_EPOCH_LENGTH: 500  # 1250
-  dataset_path: HemaStandardDataset:root=/lustre/groups/shared/histology_data/patch_lists/hematology_patches:shuffle=1
+  batch_size_per_gpu: 16 #vitg 26+, vitl: 56, vits:152, vitb:120 for 8 node
+  num_workers: 1
+  OFFICIAL_EPOCH_LENGTH: 100  # 1250
+  dataset_path: ImageNet:root=/home/paperspace/Documents/nika_space/ADE20K/ADEChallengeData2016/images/training_raw/:shuffle=1
   centering: sinkhorn_knopp
 
   drop_path_rate: 0.4
@@ -60,9 +60,9 @@ train:
 teacher:
   momentum_teacher: 0.994
 optim:
-  epochs: 200  # 500
+  epochs: 20  # 500
   weight_decay_end: 0.2
-  base_lr: 2.0e-04  # learning rate for a batch size of 1024
+  base_lr: 0.001  # learning rate for a batch size of 1024
   warmup_epochs: 20  # 80
   layerwise_decay: 1.0
 

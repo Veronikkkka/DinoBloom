@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Sampler
 
 from .datasets import (
-    HemaStandardDataset
+    HemaStandardDataset, ADK20Dataset
 )
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
@@ -40,6 +40,8 @@ def _parse_dataset_str(dataset_str: str):
 
     if name == "HemaStandardDataset":
         class_ = HemaStandardDataset
+    elif name == "ImageNet":
+        class_ = ADK20Dataset
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 
@@ -66,6 +68,7 @@ def make_dataset(
     logger.info(f'using dataset: "{dataset_str}"')
 
     class_, kwargs = _parse_dataset_str(dataset_str)
+    print("Transform:", transform)
     dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
 
     logger.info(f"# of dataset samples: {len(dataset):,d}")
